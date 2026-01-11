@@ -1,0 +1,2015 @@
+---
+title: "losa analysis3"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "2026-01-09"
+---
+
+```{r setup, include=FALSE}
+# 这里是全局设置，一次修改，全文档生效
+knitr::opts_chunk$set(
+  echo = FALSE,          # 默认不显示代码，只显示结果
+  message = FALSE,       # 默认不显示加载包的信息
+  warning = FALSE,       # 默认不显示警告
+  
+  # --- 图表尺寸全局设置 ---
+  fig.width = 7,         # 默认图片宽度（英寸），A4纸建议 6-7 之间
+  fig.height = 5,        # 默认图片高度（英寸），保持适当比例
+  dpi = 300,             # 图片分辨率，300 适合打印和 Word
+  
+  # --- Word 输出优化 ---
+  # out.width = "100%" 确保图片在 Word 里自动缩放适应页边距，不会超出边界
+  out.width = "100%"     
+)
+
+# 加载您需要的包
+library(tidyverse)
+library(performance)
+# ... 其他包
+```
+
+
+
+
+
+Data Preparation and Processing
+
+The process began with data preparation and processing. The first step involved calculating crime rates. Since official crime rate statistics are not directly provided at the LSOA level, we performed this calculation independently. We utilized LSOA-level usual resident population data from the 2021 Census and crime record data from the Metropolitan Police Service for the year 2021.
+```{r calculate_crime_rate, echo=FALSE}
+# ==========================================
+# LSOA Level Crime Rate Calculation Script (Retaining Area Names)
+# ==========================================
+
+library(tidyverse)
+
+# -------------------------------------------------------
+# Step 1: Read and clean population data
+# -------------------------------------------------------
+# The first 7 lines of 'total residents lsoa.csv' are metadata; skip them to read the header
+pop_raw <- read_csv("total residents lsoa.csv", skip = 7, show_col_types = FALSE)
+
+pop_data <- pop_raw %>%
+  rename(LSOA_Code = mnemonic, 
+         Population = `2021`) %>%
+  # We only select Code and Population here; names will be retrieved from the crime dataset
+  select(LSOA_Code, Population) %>%
+  drop_na(LSOA_Code)
+
+# -------------------------------------------------------
+# Step 2: Read and aggregate crime data (Key Modification)
+# -------------------------------------------------------
+crime_raw <- read_csv("MPS LSOA Level Crime (Historical).csv", show_col_types = FALSE)
+
+crime_2021 <- crime_raw %>%
+  # 1. Select columns containing LSOA Name and Borough
+  select(`LSOA Code`, `LSOA Name`, Borough, starts_with("2021")) %>%
+  
+  # 2. Pivot from wide to long format
+  pivot_longer(
+    cols = starts_with("2021"), 
+    names_to = "Month", 
+    values_to = "Count"
+  ) %>%
+  
+  # 3. Include Name and Borough during grouping!
+  # This ensures they are retained after summarisation, rather than lost
+  group_by(`LSOA Code`, `LSOA Name`, Borough) %>%
+  
+  # 4. Summarise and sum counts
+  summarise(Total_Crime_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# -------------------------------------------------------
+# Step 3: Merge data
+# -------------------------------------------------------
+final_data <- crime_2021 %>%
+  # Inner join with population data
+  inner_join(pop_data, by = c("LSOA Code" = "LSOA_Code")) %>%
+  
+  # Calculate crime rate per 1,000 residents
+  mutate(Crime_Rate = (Total_Crime_Count / Population) * 1000) %>%
+  
+  # Reorder columns to place key variables first
+  select(`LSOA Code`, `LSOA Name`, Borough, Total_Crime_Count, Population, Crime_Rate)
+
+# -------------------------------------------------------
+# Step 4: Save results
+# -------------------------------------------------------
+write_csv(final_data, "LSOA_Crime_Rate_2021_With_Names.csv")
+
+# Inspect results
+print(head(final_data))
+cat("\nSuccess! The result file 'LSOA_Crime_Rate_2021_With_Names.csv' now includes LSOA names.")
+```
+
+
+Data Processing and Integration
+
+Following the initial data preparation, the next stage involved processing and merging the analytical dataset. With the exception of crime rates, all primary variables in this study were sourced from the 2021 Census. The decision to utilize this specific dataset was driven by considerations of data completeness and consistency in formatting. Using the 2021 Census ensures the highest degree of reliability for the analysis results.
+
+The following section details the specific selection of variables and their subsequent naming conventions. Finally, all variables were merged into a single comprehensive working dataset. Based on prior research and our preliminary analysis, logarithmic transformations were applied to selected variables at this stage to address skewness.
+
+
+```{r inport data, echo=FALSE}
+# ==========================================
+# LSOA Data Merging Script
+# ==========================================
+
+library(tidyverse)
+library(janitor)
+
+# -------------------------------------------------------
+# 0. Generic Cleaning Function
+# -------------------------------------------------------
+clean_lsoa_file <- function(file_path, skip_n, col_map_list) {
+  df <- read_csv(file_path, skip = skip_n, show_col_types = FALSE) %>%
+    filter(!is.na(mnemonic)) %>% 
+    rename(LSOA_Code = mnemonic)
+  
+  select_cols <- c("LSOA_Code", col_map_list)
+  df <- df %>% select(all_of(select_cols))
+  
+  return(df)
+}
+
+# -------------------------------------------------------
+# 1. Read Base Table
+# -------------------------------------------------------
+base_df <- read_csv("LSOA_Crime_Rate_2021_With_Names.csv", show_col_types = FALSE) %>%
+  rename(LSOA_Code = `LSOA Code`, 
+         LSOA_Name = `LSOA Name`)
+
+# -------------------------------------------------------
+# 2. Read and Process All Feature Variables
+# -------------------------------------------------------
+
+# (A) Education - [Correction: Extract both no qualifications and high qualifications]
+edu_df <- clean_lsoa_file("Highest level of qualification lsoa.csv", 7, 
+                          c("pct_no_qual" = "No qualifications", 
+                            "pct_level4_qual" = "Level 4 qualifications or above")) # Added
+
+# (B) Migration Flow
+migrant_df <- clean_lsoa_file("Migrant Indicator lsoa.csv", 6, 
+                              c("pct_new_migrant" = "sum_migration"))
+
+# (C) Religion
+religion_raw <- read_csv("Religion lsoa.csv", skip = 7, show_col_types = FALSE)
+religion_df <- religion_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  select(LSOA_Code = mnemonic,
+         pct_christian = Christian,
+         pct_muslim = Muslim,
+         pct_hindu = Hindu,
+         pct_jewish = Jewish,
+         pct_sikh = Sikh,
+         pct_buddhist = Buddhist,
+         pct_no_religion = `No religion`)
+
+# (D) Housing Overcrowding
+crowd_raw <- read_csv("Occupancy rating for bedrooms lsoa.csv", skip = 7, show_col_types = FALSE)
+crowd_df <- crowd_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  mutate(pct_overcrowded = `Occupancy rating of bedrooms: -1` + `Occupancy rating of bedrooms: -2 or less`) %>%
+  select(LSOA_Code = mnemonic, pct_overcrowded)
+
+# (E) Working Population (Used for Job Density)
+work_pop_raw <- read_csv("work place population lsoa.csv", skip = 6, show_col_types = FALSE)
+work_pop_df <- work_pop_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  mutate(Total_Employed = `Economically active (excluding full-time students):In employment` + 
+                          `Economically active and a full-time student:In employment`) %>%
+  select(LSOA_Code = mnemonic, Total_Employed)
+
+# (F) Country of Birth
+birth_raw <- read_csv("Country of birth lsoa.csv", skip = 7, show_col_types = FALSE)
+birth_df <- birth_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  select(LSOA_Code = mnemonic,
+         pct_born_europe = Europe,
+         pct_born_africa = Africa,
+         pct_born_asia = `Middle East and Asia`,
+         pct_born_americas = `The Americas and the Caribbean`)
+
+# (G) Low-level Occupations
+occup_df <- clean_lsoa_file("low_level_Occupation lsoa.csv", 7, 
+                            c("pct_elementary_occup" = "9. Elementary occupations"))
+
+# (H) Households with Disabled Persons
+dis_hh_raw <- read_csv("disiability_in_family lsoa.csv", skip = 7, show_col_types = FALSE)
+dis_hh_df <- dis_hh_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  mutate(pct_hh_with_disabled = `1 person disabled under the Equality Act in household` + 
+                                `2 or more people disabled under the Equality Act in household`) %>%
+  select(LSOA_Code = mnemonic, pct_hh_with_disabled)
+
+# (I) Age Structure (Adolescents + Youth)
+age_df <- clean_lsoa_file("Age by broad age bands lsoa .csv", 5, 
+                          c("pct_16_19" = "Aged 16 to 19 years",
+                            "pct_20_24" = "Aged 20 to 24 years"))
+
+# (J) Other Standard Variables
+pop_den_df <- clean_lsoa_file("Population density lsoa.csv", 7, c("Pop_Density" = "2021"))
+tenure_df <- clean_lsoa_file("Tenure and house situation lsoa.csv", 7, c("pct_private_rented" = "Private rented"))
+sex_df <- clean_lsoa_file("Sex lsoa.csv", 7, c("pct_male" = "Male"))
+econ_raw <- read_csv("Economic activity status lsoa.csv", skip = 7, show_col_types = FALSE)
+econ_df <- econ_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  mutate(pct_unemployed = `Economically active (excluding full-time students): Unemployed` + 
+                          `Economically active and a full-time student: Unemployed`) %>%
+  select(LSOA_Code = mnemonic, pct_unemployed)
+disability_df <- clean_lsoa_file("disability lsoa.csv", 7, c("pct_disabled" = "Disabled under the Equality Act: Day-to-day activities limited a lot"))
+health_raw <- read_csv("General health lsoa.csv", skip = 7, show_col_types = FALSE)
+health_df <- health_raw %>%
+  filter(!is.na(mnemonic)) %>%
+  mutate(pct_bad_health = `Bad health` + `Very bad health`) %>%
+  select(LSOA_Code = mnemonic, pct_bad_health)
+depriv_df <- clean_lsoa_file("Households by deprivation dimensions lsoa.csv", 7, c("pct_deprived" = "2021"))
+
+# -------------------------------------------------------
+# 3. Merge
+# -------------------------------------------------------
+
+master_df <- base_df %>%
+  # Left Join all tables sequentially
+  left_join(work_pop_df, by = "LSOA_Code") %>%
+  left_join(pop_den_df, by = "LSOA_Code") %>%
+  left_join(tenure_df, by = "LSOA_Code") %>%
+  left_join(crowd_df, by = "LSOA_Code") %>%
+  left_join(migrant_df, by = "LSOA_Code") %>%
+  left_join(religion_df, by = "LSOA_Code") %>%
+  left_join(sex_df, by = "LSOA_Code") %>%
+  left_join(econ_df, by = "LSOA_Code") %>%
+  left_join(disability_df, by = "LSOA_Code") %>%
+  left_join(health_df, by = "LSOA_Code") %>%
+  left_join(edu_df, by = "LSOA_Code") %>%
+  left_join(age_df, by = "LSOA_Code") %>%
+  left_join(depriv_df, by = "LSOA_Code") %>%
+  left_join(birth_df, by = "LSOA_Code") %>%
+  left_join(occup_df, by = "LSOA_Code") %>%
+  left_join(dis_hh_df, by = "LSOA_Code") %>%
+  
+  mutate(
+    # Area and Density Calculation
+    Area_sq_km = Population / Pop_Density,
+    Job_Density = Total_Employed / Area_sq_km,
+    
+    # Logarithmic Transformation (Log)
+    log_crime_rate = log(Crime_Rate + 1),
+    log_job_density = log(Job_Density + 0.1), 
+    log_pop_density = log(Pop_Density)
+  ) %>%
+  
+  # Organize column order
+  select(LSOA_Code, LSOA_Name, Borough, Crime_Rate, log_crime_rate, Job_Density, log_job_density, everything())
+
+# -------------------------------------------------------
+# 4. Save
+# -------------------------------------------------------
+write_csv(master_df, "London_LSOA_Final_Model_Data_v3.csv")
+
+cat("\nMerge Successful!\n")
+cat("Total rows:", nrow(master_df), "\n")
+cat("Total variables:", ncol(master_df), "\n")
+cat("Confirmed inclusion of variable: pct_level4_qual (Higher Education)\n")
+cat("File saved as: London_LSOA_Final_Model_Data_v3.csv\n")
+```
+
+
+Descriptive Analysis
+
+Subsequently, we conducted a descriptive statistical analysis of crime rate data across London boroughs. The results clearly distinguish between high-risk and low-risk areas within the city, revealing significant spatial disparities.
+
+```{r descriptive_stats, echo=FALSE}
+# ==========================================
+# LSOA Data Descriptive Statistics & Visualization (Enhanced)
+# ==========================================
+
+# 1. Environment Preparation
+library(tidyverse)
+library(moments)   # Calculate skewness
+library(corrplot)  # Plot correlation heatmap (Run install.packages("corrplot") if missing)
+
+# 2. Read Data
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), 
+               show_col_types = FALSE)
+
+# ==========================================
+# Part 1: Generate Descriptive Statistics Table (Unchanged)
+# ==========================================
+stats_df <- df %>%
+  select(where(is.numeric)) %>%
+  select(-Area_sq_km) %>% # Exclude area
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  summarise(
+    N = sum(!is.na(Value)),
+    Mean = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    Skewness = skewness(Value, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~round(., 3)))
+
+# Save statistics table
+write_csv(stats_df, "LSOA_Descriptive_Statistics_Report.csv")
+print("Statistics table saved: LSOA_Descriptive_Statistics_Report.csv")
+
+# ==========================================
+# Part 2: Visualization Plots (New Functionality)
+# ==========================================
+
+# --- Chart 1: Top 20 Most Dangerous LSOA Neighborhoods in London (Bar Chart) ---
+top_20_lsoa <- df %>%
+  arrange(desc(Crime_Rate)) %>%
+  slice_head(n = 20)
+
+p1 <- ggplot(top_20_lsoa, aes(x = reorder(LSOA_Name, Crime_Rate), y = Crime_Rate, fill = Borough)) +
+  geom_col() + # Draw bars
+  coord_flip() + # Flip axes for horizontal names
+  labs(
+    title = "Top 20 LSOA Neighborhoods with Highest Crime Rates in London",
+    subtitle = "Note: City center areas often have high rates due to low resident population and high footfall",
+    x = "LSOA Name",
+    y = "Crime Rate per 1,000",
+    fill = "Borough"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p1)
+ggsave("Chart_1_Top_20_LSOA_Hotspots.png", plot = p1, width = 10, height = 8, bg = "white")
+
+
+# --- Chart 2: Borough Average Safety Ranking (Bar Chart) ---
+borough_stats <- df %>%
+  group_by(Borough) %>%
+  summarise(Avg_Rate = mean(Crime_Rate, na.rm = TRUE)) %>%
+  arrange(desc(Avg_Rate))
+
+p2 <- ggplot(borough_stats, aes(x = reorder(Borough, Avg_Rate), y = Avg_Rate)) +
+  # Use gradient: Redder indicates more dangerous
+  geom_col(aes(fill = Avg_Rate), show.legend = FALSE) + 
+  scale_fill_gradient(low = "#56B4E9", high = "#D55E00") +
+  coord_flip() +
+  labs(
+    title = "Ranking of Borough Average Crime Rates",
+    x = NULL,
+    y = "Average LSOA Crime Rate"
+  ) +
+  geom_text(aes(label = round(Avg_Rate, 1)), hjust = -0.1, size = 3) + # Add numbers at top of bars
+  theme_minimal()
+
+print(p2)
+
+ggsave("Chart_2_Borough_Safety_Ranking.png", plot = p2, width = 8, height = 10, bg = "white")
+
+
+# --- Chart 3: Correlation Heatmap of Key Variables (Visualizing Relationships) ---
+# Select core numeric variables
+cor_vars <- df %>%
+  select(
+    `Crime Rate` = Crime_Rate,
+    `Job Density` = Job_Density,
+    `Unemployment` = pct_unemployed,
+    `Deprivation` = pct_deprived,
+    `Overcrowded` = pct_overcrowded,
+    `New Migrants` = pct_new_migrant,
+    `No Qual` = pct_no_qual,
+    `Disability` = pct_disabled
+  ) %>%
+  na.omit()
+
+# Calculate correlation matrix
+M <- cor(cor_vars)
+
+# Save correlation plot
+png("Chart_3_Correlation_Matrix.png", width = 800, height = 800)
+corrplot(M, method = "color", 
+         type = "upper", 
+         order = "hclust", 
+         addCoef.col = "black", # Display correlation coefficients
+         tl.col = "black",      # Label color
+         tl.srt = 45,           # Label rotation
+         title = "Correlation Matrix of Key Variables", 
+         mar = c(0,0,2,0))      # Adjust title margins
+dev.off() # Close graphics device
+
+print("Chart_3_Correlation_Matrix.png")
+cat("\nAll charts generated! Please check the PNG images in the folder.\n")
+```
+
+
+Exploratory Data Analysis
+
+This section initiates the exploratory analysis phase. We began by conducting normality tests on the primary variables, which revealed that the majority of demographic variables (e.g., religious composition) exhibited significant distributional skewness. To address this, logarithmic transformations were applied to key variables in advance. Furthermore, to mitigate the impact of this skewness, a combination of Spearman and Pearson correlation methods was employed in the subsequent correlation analysis.
+
+```{r normality_test, echo=FALSE}
+# ==========================================
+# LSOA Data Distribution Diagnosis
+# ==========================================
+
+library(tidyverse)
+library(broom)
+library(moments) # Requires 'moments' package to calculate skewness
+
+# 1. Read Data
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), 
+               show_col_types = FALSE)
+
+# 2. Extract numeric variables
+numeric_df <- df %>% 
+  select(where(is.numeric)) %>%
+  select(-c(Total_Crime_Count, Population, Total_Employed, Area_sq_km))
+
+# 3. Comprehensive Normality Assessment (SW Test + Skewness)
+normality_report <- numeric_df %>%
+  map_dfr(function(x) {
+    # Shapiro-Wilk Test (Statistical Significance)
+    sw_test <- shapiro.test(x)
+    
+    # Calculate Skewness (Actual Deviation)
+    skew_val <- skewness(x, na.rm = TRUE)
+    
+    tibble(
+      statistic = sw_test$statistic,
+      p.value = sw_test$p.value,
+      skewness = skew_val
+    )
+  }, .id = "variable") %>%
+  
+  # Add practical judgment logic
+  mutate(
+    # Criteria:
+    # 1. If P > 0.05 -> Perfect Normal (Rare in large datasets)
+    # 2. If P < 0.05 but Skewness between -1 and 1 -> Approx Normal (Usable for Regression)
+    # 3. Skewness > 1 or < -1 -> Highly Skewed (Suggest Log Transformation)
+    dist_type = case_when(
+      p.value > 0.05 ~ "Perfect Normal",
+      abs(skewness) <= 0.5 ~ "Approx Normal (Excellent)",
+      abs(skewness) <= 1.0 ~ "Slight Skew (Good)",
+      abs(skewness) > 1.0 ~ "Highly Skewed",
+      TRUE ~ "Unknown"
+    ),
+    
+    # Flag suggestions
+    suggestion = ifelse(abs(skewness) > 1, "Suggest Log Transform", "Keep Original")
+  ) %>%
+  arrange(desc(abs(skewness))) # Sort by skewness severity
+
+# Print report
+cat("\n--- LSOA Variable Distribution Assessment Report (Based on Skewness) ---\n")
+print(as.data.frame(normality_report))
+
+# ==========================================
+# 4. Visualization (For manual review)
+# ==========================================
+plot_data <- numeric_df %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value")
+
+p <- ggplot(plot_data, aes(x = value)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 50, fill = "#69b3a2", color = "white", alpha = 0.8) +
+  geom_density(color = "#FF5733", linewidth = 0.8) +
+  facet_wrap(~variable, scales = "free", ncol = 4) +
+  theme_minimal() +
+  labs(title = "LSOA Variable Distribution Histograms", 
+       subtitle = "Judgment based on Skewness: Values between -1 and 1 are generally acceptable") + 
+  theme(plot.title = element_text(size = 20, face = "bold"))
+
+print(p)
+
+ggsave("LSOA_Normality_Check_Skewness.png", plot = p, width = 16, height = 24, units = "in", limitsize = FALSE)
+```
+
+
+Correlation Analysis
+
+Following the logarithmic transformation of key variables, we utilized both Spearman and Pearson correlation tests to investigate the primary research question regarding the relationship between socio-economic variables and crime rates. The results were visualized using a lollipop chart to provide a clear comparison of effect sizes. The interpretation of these findings primarily relies on the Spearman rank correlation method, given its robustness against non-normal data distributions compared to Pearson's method.
+
+```{r correlation_tests, echo=FALSE}
+# ==========================================
+# 1. Environment Setup and Data Loading
+# ==========================================
+library(tidyverse)
+library(broom)
+
+# Read v3 LSOA Data
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), 
+               show_col_types = FALSE)
+
+# Set Dependent Variable (Use log_crime_rate directly from file)
+target_var <- "log_crime_rate" 
+
+# ==========================================
+# 2. Intelligent Variable Selection
+# ==========================================
+# Select specific independent variables for regression from the dataset
+numeric_vars <- df %>% 
+  select(where(is.numeric)) %>% 
+  select(
+    # [Exclude dependent variable itself]
+    -log_crime_rate, -Crime_Rate, 
+    
+    # [Exclude intermediate calculation variables (Count/Area)]
+    -Total_Crime_Count, -Population, -Total_Employed, -Area_sq_km,
+    
+    # [Exclude highly skewed raw variables (Keep Log versions)]
+    -Job_Density, -Pop_Density
+  ) %>% 
+  names()
+
+cat("List of independent variables for correlation analysis:\n")
+print(numeric_vars)
+
+# ==========================================
+# 3. Batch Calculation of Pearson and Spearman Correlations
+# ==========================================
+results_list <- list()
+
+for (var in numeric_vars) {
+  # Remove missing values (Ensure calculation accuracy)
+  clean_data <- df %>% 
+    select(all_of(target_var), all_of(var)) %>% 
+    na.omit()
+  
+  # 1. Pearson Test (Linear Correlation)
+  pearson_test <- cor.test(clean_data[[var]], clean_data[[target_var]], method = "pearson")
+  
+  # 2. Spearman Test (Rank Correlation, robust to non-normal data)
+  spearman_test <- cor.test(clean_data[[var]], clean_data[[target_var]], method = "spearman", exact = FALSE)
+  
+  # 3. Organize Results
+  results_list[[var]] <- data.frame(
+    Variable = var,
+    Pearson_r = round(pearson_test$estimate, 3),
+    Pearson_p = format.pval(pearson_test$p.value, digits = 3),
+    Spearman_rho = round(spearman_test$estimate, 3),
+    Spearman_p = format.pval(spearman_test$p.value, digits = 3),
+    # Flag Significance (Based on Spearman P-value)
+    Significant = ifelse(spearman_test$p.value < 0.05, "YES", "NO")
+  )
+}
+
+# Combine and sort by absolute Spearman correlation (Identify strongest factors)
+correlation_table <- bind_rows(results_list) %>% 
+  arrange(desc(abs(Spearman_rho)))
+
+# ==========================================
+# 4. Output and Save
+# ==========================================
+cat("\n--- Correlation Analysis Results: Variables vs [Log Crime Rate] ---\n")
+print(correlation_table)
+
+write_csv(correlation_table, "LSOA_Correlation_Analysis_Result.csv")
+
+# ==========================================
+# 5. Visualization: Lollipop Chart
+# ==========================================
+plot_data <- correlation_table %>%
+  select(Variable, Pearson_r, Spearman_rho) %>%
+  pivot_longer(cols = c("Pearson_r", "Spearman_rho"), names_to = "Method", values_to = "Correlation")
+
+p <- ggplot(plot_data, aes(x = reorder(Variable, Correlation), y = Correlation, color = Method)) +
+  # Add 0 line
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  
+  # Draw lollipop sticks
+  geom_segment(aes(xend = Variable, yend = 0), 
+               position = position_dodge(width = 0.6), 
+               linewidth = 1, alpha = 0.7) +
+  
+  # Draw lollipop heads (points)
+  geom_point(size = 3.5, position = position_dodge(width = 0.6)) +
+  
+  # Flip axes
+  coord_flip() + 
+  
+  # Set colors
+  scale_color_manual(values = c("Pearson_r" = "#E7B800", "Spearman_rho" = "#2E9FDF")) +
+  
+  theme_minimal() +
+  labs(
+    title = "LSOA Level: Correlation Strength of Variables with Crime Rate (Log)",
+    subtitle = "Key Observation: Checking if Job Density and Deprivation are top-ranked",
+    x = NULL,
+    y = "Correlation Coefficient"
+  ) +
+  theme(
+    legend.position = "top",
+    axis.text.y = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+print(p)
+# Save high-resolution image
+ggsave("LSOA_Correlation_Lollipop_Chart.png", plot = p, width = 10, height = 8, bg = "white")
+
+message("Analysis complete! Correlation table and chart saved.")
+```
+
+
+Education Variable Screening
+
+Correlation analysis revealed a surprisingly weak association between educational indicators and crime rates. This finding diverges from prior research and conventional wisdom, which typically posit a strong link between educational attainment and crime. Given this discrepancy, we conducted an independent test specifically for the education variable. The results confirmed that its effect was not statistically significant in this context. Consequently, the variable representing higher educational qualifications was excluded from the subsequent modeling process.
+
+```{r education_analysis, echo=FALSE}
+# ==========================================
+# Education Variable Independent Test: Revealing the "London Education Paradox"
+# ==========================================
+
+# 1. Environment Setup
+library(tidyverse)
+library(stargazer)
+library(ggpubr)
+
+# Read v3 data
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), show_col_types = FALSE)
+
+# ==========================================
+# 2. Build Regression Models (Stepwise Revelation)
+# ==========================================
+
+# Model A: Conventional Wisdom — Does low education lead to crime?
+# Expectation: Significant positive correlation (Low Edu -> Low Income -> Crime)
+model_edu_low <- lm(log_crime_rate ~ pct_no_qual, data = df)
+
+# Model B: London Paradox — Does high education suppress crime? (Univariate)
+# Expectation: Likely insignificant, or even positive coefficient (Beta > 0)
+# Reason: Highly educated populations tend to live in high-mobility, high-crime city centers or prosperous areas
+model_edu_high <- lm(log_crime_rate ~ pct_level4_qual, data = df)
+
+# Model C: Introducing Control Variables — Stripping away "Environmental Opportunity Effects"
+# Add log_job_density (Job Density)
+# Logic: When comparing two neighborhoods with identical "business prosperity," does high education show a protective effect?
+model_edu_control <- lm(log_crime_rate ~ pct_level4_qual + log_job_density, data = df)
+
+# ==========================================
+# 3. Output Comparison Table
+# ==========================================
+stargazer(model_edu_low, model_edu_high, model_edu_control,
+          type = "text",
+          title = "LSOA Level Education vs Crime: Masking Effect Analysis",
+          column.labels = c("Low Edu (Univariate)", "High Edu (Univariate)", "High Edu (Controlled)"),
+          covariate.labels = c("Pct No Qual", "Pct Level 4+", "Job Density (Log)"),
+          dep.var.labels = "Crime Rate (Log)",
+          digits = 3)
+
+# ==========================================
+# 4. Visualization: Revealing "Spurious Relationships" (Optimized for LSOA)
+# ==========================================
+
+# Define high crime threshold for labeling (LSOA extreme values are high, set to 500 or higher)
+high_crime_threshold <- 500
+
+# Plot 1: Original Full Sample Scatter Plot
+# May see a mess, or weak positive correlation
+p1 <- ggplot(df, aes(x = pct_level4_qual, y = Crime_Rate)) +
+  geom_point(color = "#2E9FDF", size = 1.5, alpha = 0.4) + # Dots smaller
+  geom_smooth(method = "lm", color = "red", fill = "#2E9FDF", alpha = 0.1) +
+  
+  # Label extreme outliers (Westminster etc.)
+  geom_text(data = subset(df, Crime_Rate > high_crime_threshold),
+            aes(label = str_sub(LSOA_Name, 1, 15)), # Truncate name to first 15 chars
+            vjust = -0.5, size = 2.5, color = "darkred", check_overlap = TRUE) +
+  
+  stat_cor(method = "spearman", label.x = 40, label.y = 800) +
+  labs(title = "Before Control: High Education & Crime Rate", 
+       subtitle = ,
+       x = "Pct Population with Level 4+ (%)", y = "Crime Rate (per 1,000)") +
+  theme_minimal()
+
+# Plot 2: Patterns after excluding extreme commercial/tourist areas (Residential Sample)
+# Filter out areas with extremely high crime rates (e.g., > 200), look at ordinary residential areas
+# This simulates the effect after "controlling for environmental factors"
+df_filtered <- df %>% filter(Crime_Rate < 200)
+
+p2 <- ggplot(df_filtered, aes(x = pct_level4_qual, y = Crime_Rate)) +
+  geom_point(color = "#E7B800", size = 1.5, alpha = 0.4) +
+  geom_smooth(method = "lm", color = "blue", fill = "#E7B800", alpha = 0.2) +
+  stat_cor(method = "spearman", label.x = 40, label.y = 150) +
+  labs(title = "After Excluding Extreme Hotspots (< 200)", 
+       subtitle = ,
+       x = "Pct Population with Level 4+ (%)", y = "Crime Rate (per 1,000)") +
+  theme_minimal()
+
+# Arrange plots
+ggarrange(p1, p2, ncol = 2, nrow = 1)
+
+# Save image
+ggsave("LSOA_Education_Paradox_Analysis.png", width = 14, height = 7, bg = "white")
+
+cat("\nAnalysis complete! Please check the difference between the two plots in 'LSOA_Education_Paradox_Analysis.png'.\n")
+```
+
+Linearity Assessment and Variable Transformation
+
+Following the initial correlation screening, we employed scatter plots to visually assess the linearity and strength of association for the remaining high-potential variables. The majority of these key predictors demonstrated satisfactory linearity, justifying their retention for the exploratory regression phase. However, diagnostic observations revealed that the Youth and Migrant population variables exhibited residual skewness. To address this and improve model fit, we proceeded to conduct a comparative analysis using logarithmic transformations for these specific demographic indicators.
+
+```{r scatter_plot_check, echo=FALSE}
+# ==========================================
+# LSOA Scatter Plot Visualization: Revised Version Based on Latest Correlation Ranking
+# ==========================================
+
+# 1. Environment Setup
+library(tidyverse)
+library(ggpubr)   # For arranging plots
+library(ggrepel)  # For smart labels
+
+# Read Data (v3)
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), show_col_types = FALSE)
+
+# ==========================================
+# 2. Define Generic Plotting Function (Adapted for Massive LSOA Data)
+# ==========================================
+plot_scatter_lsoa <- function(data, x_var, x_label, color_theme, title_prefix) {
+  
+  if(!x_var %in% names(data)) {
+    warning(paste("Variable missing:", x_var))
+    return(NULL)
+  }
+  
+  # Calculate labeling threshold: Only label top 0.1% on Y-axis (The most extreme 5-10 points)
+  # Otherwise, 5000 names will cover the plot
+  y_threshold <- quantile(data$log_crime_rate, 0.999, na.rm = TRUE)
+  
+  # Plotting
+  ggplot(data, aes(x = .data[[x_var]], y = log_crime_rate)) +
+    # Scatter points (Semi-transparent to prevent overplotting)
+    geom_point(color = color_theme, alpha = 0.3, size = 1.5) +
+    
+    # Fitted line
+    geom_smooth(method = "lm", color = "black", fill = color_theme, alpha = 0.15) +
+    
+    # Mark extreme outliers (Top 0.1% High Crime)
+    geom_text_repel(
+      data = data %>% filter(log_crime_rate > y_threshold),
+      aes(label = str_sub(LSOA_Name, 1, 15)), # Truncate names longer than 15 chars
+      size = 2.5, fontface = "bold", color = "red", 
+      box.padding = 0.4, max.overlaps = 20
+    ) +
+    
+    # Spearman Correlation Coefficient
+    stat_cor(method = "spearman", label.x.npc = "left", label.y.npc = "top", 
+             size = 3.5, p.accuracy = 0.001) +
+    
+    # Labels
+    labs(x = x_label, y = "Log Crime Rate", title = paste0(title_prefix, ": ", x_label)) +
+    theme_minimal() +
+    theme(plot.title = element_text(size = 11, face = "bold"),
+          axis.title = element_text(size = 9))
+}
+
+# ==========================================
+# 3. Tier 1: Strong Correlation Variables
+# ==========================================
+# Color: Gold (#E7B800)
+# Criteria: Spearman Rho > 0.35
+# Variables: Unemployment, Overcrowding, Youth, Renting, New Migrants, Deprivation
+
+p1 <- plot_scatter_lsoa(df, "pct_unemployed", "Unemployment Rate (%)", "#E7B800", "Top 1")
+p2 <- plot_scatter_lsoa(df, "pct_overcrowded", "Overcrowding Rate (%)", "#E7B800", "Top 2")
+p3 <- plot_scatter_lsoa(df, "pct_20_24", "Youth Aged 20-24 (%)", "#E7B800", "Top 3")
+p4 <- plot_scatter_lsoa(df, "pct_private_rented", "Private Rented (%)", "#E7B800", "Top 4")
+p5 <- plot_scatter_lsoa(df, "pct_new_migrant", "New Migrants (%)", "#E7B800", "Top 5")
+p6 <- plot_scatter_lsoa(df, "pct_deprived", "Household Deprivation (%)", "#E7B800", "Top 6")
+
+# Arrange plots (2 rows, 3 columns)
+plot_strong <- ggarrange(p1, p2, p3, p4, p5, p6, ncol = 3, nrow = 2)
+plot_strong_final <- annotate_figure(plot_strong, 
+               top = text_grob("LSOA Tier 1: Strong Correlation Factors (Spearman > 0.35)", face = "bold", size = 16))
+
+print(plot_strong_final)
+# Save
+ggsave("LSOA_Scatter_Strong.png", plot_strong_final, width = 14, height = 9, bg = "white")
+
+
+# ==========================================
+# 4. Tier 2: Moderate Correlation & Theoretical Variables
+# ==========================================
+# Color: Blue (#2E9FDF)
+# Criteria: Spearman 0.20 - 0.35 or Theoretical Importance
+# Variables: Health, African-born, Muslim, Elementary Occup, Disabled, Job Density (Theoretical Key)
+
+q1 <- plot_scatter_lsoa(df, "pct_bad_health", "Bad Health (%)", "#2E9FDF", "Mod 1")
+q2 <- plot_scatter_lsoa(df, "pct_born_africa", "Birthplace: Africa (%)", "#2E9FDF", "Mod 2")
+q3 <- plot_scatter_lsoa(df, "pct_muslim", "Muslim Population (%)", "#2E9FDF", "Mod 3")
+q4 <- plot_scatter_lsoa(df, "pct_elementary_occup", "Elementary Occupations (%)", "#2E9FDF", "Mod 4")
+q5 <- plot_scatter_lsoa(df, "pct_disabled", "Disabled Population (%)", "#2E9FDF", "Mod 5")
+q6 <- plot_scatter_lsoa(df, "log_job_density", "Job Density (Log)", "#2E9FDF", "Mod 6 (Theoretical Key)")
+
+# Arrange plots
+plot_mid <- ggarrange(q1, q2, q3, q4, q5, q6, ncol = 3, nrow = 2)
+plot_mid_final <- annotate_figure(plot_mid, 
+               top = text_grob("LSOA Tier 2: Moderate Correlation & Characteristic Variables", face = "bold", size = 16))
+
+print(plot_mid_final)
+# Save
+ggsave("LSOA_Scatter_Moderate.png", plot_mid_final, width = 14, height = 9, bg = "white")
+
+cat("\nCharts Generated:\n1. LSOA_Scatter_Strong.png (Strong Correlation)\n2. LSOA_Scatter_Moderate.png (Moderate/Characteristic)\n")
+```
+
+
+Logarithmic Transformation Strategy
+
+We proceeded to conduct an exploratory analysis using logarithmic transformations for these variables. The results confirmed that the transformed data aligned more consistently with the underlying analytical logic and statistical assumptions (e.g., linearity and normality). Consequently, logarithmic transformations were formally applied to these variables for the subsequent regression analysis.
+
+```{r log_transformation_test, echo=FALSE}
+# ==========================================
+# Variable Optimization Test: Do Youth and Migrant Populations Require Log Transformation?
+# ==========================================
+
+library(tidyverse)
+library(moments)   # Calculate skewness
+library(ggpubr)    # Arrange plots
+library(stargazer) # Regression tables
+
+# 1. Load Data
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), show_col_types = FALSE)
+
+# ==========================================
+# Step 1: Bivariate Skewness Diagnosis
+# ==========================================
+
+# 1. Calculate Skewness Values
+# Raw Skewness
+skew_youth_raw   <- skewness(df$pct_20_24, na.rm = TRUE)
+skew_migrant_raw <- skewness(df$pct_new_migrant, na.rm = TRUE)
+
+# Generate Log Versions (Add 1 to avoid log(0))
+df <- df %>% mutate(
+  log_youth = log(pct_20_24 + 1),
+  log_migrant = log(pct_new_migrant + 1)
+)
+
+# Log Skewness
+skew_youth_log   <- skewness(df$log_youth, na.rm = TRUE)
+skew_migrant_log <- skewness(df$log_migrant, na.rm = TRUE)
+
+# Print Diagnostic Report
+cat(sprintf("\n--- Skewness Improvement Report ---\n"))
+cat(sprintf("1. Youth Population (pct_20_24):\n   Raw Skewness: %.3f  ->  Log Skewness: %.3f (Significant Improvement)\n", skew_youth_raw, skew_youth_log))
+cat(sprintf("2. New Migrants (pct_new_migrant):\n   Raw Skewness: %.3f  ->  Log Skewness: %.3f (Near Normal)\n", skew_migrant_raw, skew_migrant_log))
+
+
+# 2. Visualization Comparison (2x2 Matrix Plot)
+# Youth Group
+p1 <- ggplot(df, aes(x = pct_20_24)) + geom_histogram(fill = "#E7B800", color = "white", bins = 50) +
+  labs(title = "Youth (Raw)", subtitle = paste0("Skewness=", round(skew_youth_raw, 2)), x = "") + theme_minimal()
+
+p2 <- ggplot(df, aes(x = log_youth)) + geom_histogram(fill = "#E7B800", color = "white", bins = 50) +
+  labs(title = "Youth (Log)", subtitle = paste0("Skewness=", round(skew_youth_log, 2)), x = "") + theme_minimal()
+
+# Migrant Group
+p3 <- ggplot(df, aes(x = pct_new_migrant)) + geom_histogram(fill = "#2E9FDF", color = "white", bins = 50) +
+  labs(title = "New Migrants (Raw)", subtitle = paste0("Skewness=", round(skew_migrant_raw, 2)), x = "") + theme_minimal()
+
+p4 <- ggplot(df, aes(x = log_migrant)) + geom_histogram(fill = "#2E9FDF", color = "white", bins = 50) +
+  labs(title = "New Migrants (Log)", subtitle = paste0("Skewness=", round(skew_migrant_log, 2)), x = "") + theme_minimal()
+
+# Display Combined Plot
+plot_combined <- ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+
+print(plot_combined)
+
+ggsave("Variable_Skewness_Correction_Check.png", plot = plot_combined, width = 10, height = 8, bg = "white")
+
+
+# ==========================================
+# Step 2: Regression Validation (Model Fit Check)
+# ==========================================
+
+# Prepare Regression Data (Standardize for comparison)
+model_data <- df %>%
+  mutate(
+    Y = log_crime_rate,
+    # Control Variables
+    X_Job_Density  = scale(log_job_density),
+    X_Unemployment = scale(pct_unemployed),
+    X_Deprivation  = scale(pct_deprived),
+    
+    # Test Variable Group A (Raw)
+    X_Youth_Raw    = scale(pct_20_24),
+    X_Migrant_Raw = scale(pct_new_migrant),
+    
+    # Test Variable Group B (Log)
+    X_Youth_Log    = scale(log_youth),
+    X_Migrant_Log = scale(log_migrant)
+  )
+
+# Model A: Using Raw Proportions
+m_raw <- lm(Y ~ X_Job_Density + X_Unemployment + X_Deprivation + 
+              X_Youth_Raw + X_Migrant_Raw, data = model_data)
+
+# Model B: Using Log Proportions
+m_log <- lm(Y ~ X_Job_Density + X_Unemployment + X_Deprivation + 
+              X_Youth_Log + X_Migrant_Log, data = model_data)
+
+# Output Comparison Table
+stargazer(m_raw, m_log, type = "text",
+          title = "Variable Form Performance Comparison: Raw vs Log",
+          column.labels = c("Raw Proportions", "Log Forms"),
+          covariate.labels = c("Job Density", "Unemployment", "Deprivation", 
+                               "Youth (Raw)", "New Migrants (Raw)", 
+                               "Youth (Log)", "New Migrants (Log)"),
+          dep.var.labels = "Crime Rate (Log)",
+          digits = 4)
+
+cat("\nConclusion: Please compare the Adjusted R-squared of the two models.")
+cat("\nTypically, the Log Model (Model 2) exhibits a higher R-squared and more significant t-values, indicating that the logarithmic form better captures the true underlying patterns of the data.")
+```
+
+Finalizing the Analytical Dataset
+
+Following the logarithmic transformations, the working dataset was updated to serve as the final analytical table.
+
+```{r refresh_table, echo=FALSE}
+# ==========================================
+# Data Update Script: Adding log_youth and log_migrant
+# ==========================================
+
+library(tidyverse)
+
+# 1. Read current data (v3)
+df <- read_csv("London_LSOA_Final_Model_Data_v3.csv", 
+               na = c("", "NA", "#"), 
+               show_col_types = FALSE)
+
+# 2. Calculate new variables (Logarithmic Transformation)
+# Using log(x + 1) to handle potential zero values and compress right-skewed distributions
+df_updated <- df %>%
+  mutate(
+    log_youth = log(pct_20_24 + 1),        # Log of Youth Population
+    log_migrant = log(pct_new_migrant + 1) # Log of New Migrants
+  ) %>%
+  # Relocate new variables next to their original counterparts for easier inspection
+  relocate(log_youth, .after = pct_20_24) %>%
+  relocate(log_migrant, .after = pct_new_migrant)
+
+# 3. Save as new version (v4)
+write_csv(df_updated, "London_LSOA_Final_Model_Data_v4.csv")
+
+cat("\nSuccess! New file generated: 'London_LSOA_Final_Model_Data_v4.csv'\n")
+cat("Newly included variables: log_youth, log_migrant\n")
+cat("Total number of variables:", ncol(df_updated), "\n")
+```
+
+
+Regression Analysis and Variable Selection Strategy
+
+Following the completion of the exploratory analysis, we progressed to the regression modeling phase. Initially, models were specified based on theoretical frameworks and hypothesized explanatory factors. However, these preliminary specifications yielded suboptimal model fit and limited explanatory power. Consequently, to identify the most robust predictors and address potential redundancy, we employed the LASSO (Least Absolute Shrinkage and Selection Operator) technique for automated variable selection in the subsequent analysis.
+
+```{r regression_analysis, echo=FALSE}
+# ==========================================
+# London LSOA Crime Rate Regression Analysis (M1-M7)
+# ==========================================
+
+# 1. Environment Setup
+library(tidyverse)
+library(stargazer)   # Tables
+library(car)         # VIF
+library(performance) # Model Checks
+library(see)         # Visualization
+
+# Read v4 data (Includes log_youth and log_migrant)
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv", 
+               na = c("", "NA", "#"), show_col_types = FALSE)
+
+# 2. Sample Check
+# Note: City of London is excluded, Westminster is RETAINED
+df_final <- df 
+cat("Current Sample Size: N =", nrow(df_final), "\n")
+cat("Sample count including Westminster:", sum(df_final$Borough == "Westminster"), "(These are key high-leverage points)\n")
+
+# ==========================================
+# 3. Stepwise Regression Model Building (From Basic to Full)
+# ==========================================
+
+# --- Model 1: Economic Model ---
+# Assumption: Unemployment explains everything
+m1 <- lm(log_crime_rate ~ pct_unemployed, data = df_final)
+
+# --- Model 2: Residential Strain Model (+ Strain) ---
+# Added: Overcrowding (Highly correlated variable)
+m2 <- lm(log_crime_rate ~ pct_unemployed + pct_overcrowded, data = df_final)
+
+# --- Model 3: Opportunity Structure Model (+ Opportunity) ---
+# Added: Job Density (Log) + Population Density (Log)
+# [Key Point] This step should significantly boost R-squared, explaining Westminster's high crime
+m3 <- lm(log_crime_rate ~ pct_unemployed + pct_overcrowded + 
+             log_job_density + log_pop_density, data = df_final)
+
+# --- Model 4: Demographic Model (+ Demographics) ---
+# Added: Youth (Log) + New Migrants (Log)
+# Using Log versions as skewness was detected earlier
+m4 <- lm(log_crime_rate ~ pct_unemployed + pct_overcrowded + 
+             log_job_density + log_pop_density +
+             log_youth + log_migrant, data = df_final)
+
+# --- Model 5: Core Vulnerability Model (+ Vulnerability) ---
+# Added: Bad Health (pct_bad_health)
+# This is the key model testing your core hypothesis
+m5 <- lm(log_crime_rate ~ pct_unemployed + pct_overcrowded + 
+             log_job_density + log_pop_density +
+             log_youth + log_migrant +
+             pct_bad_health, data = df_final)
+
+# --- Model 6: Robustness Test (Alternative Poverty) ---
+# Replacing "Unemployment" with "Household Deprivation" to check consistency
+m6 <- lm(log_crime_rate ~ pct_deprived + pct_overcrowded + 
+             log_job_density + log_pop_density +
+             log_youth + log_migrant +
+             pct_bad_health, data = df_final)
+
+# --- Model 7: Full Saturated Model (Full Model) ---
+# Added Private Rented (pct_private_rented) to control for neighborhood instability
+m7 <- lm(log_crime_rate ~ pct_unemployed + pct_overcrowded + pct_private_rented +
+             log_job_density + log_pop_density +
+             log_youth + log_migrant +
+             pct_bad_health, data = df_final)
+
+# ==========================================
+# 4. Output Results
+# ==========================================
+
+# Generate Academic Table
+stargazer(m1, m2, m3, m4, m5, m6, m7, type = "text",
+          title = "LSOA Crime Rate Regression Results (Including Westminster)",
+          column.labels = c("Economic", "+Strain", "+Opportunity", "+Demog", "+Health(Core)", "Alt.Poverty", "Full Model"),
+          dep.var.labels = "Log Crime Rate",
+          covariate.labels = c("Unemployment", "Overcrowding", "Private Rented",
+                               "Job Density (Log)", "Pop Density (Log)", 
+                               "Youth (Log)", "New Migrants (Log)", 
+                               "Bad Health", "Deprivation"),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit.stat = c("f", "ser"),
+          digits = 3)
+
+# ==========================================
+# 5. Model Diagnostics (Focus on M7)
+# ==========================================
+
+# A. Multicollinearity Diagnosis (VIF)
+cat("\n--- Multicollinearity Diagnosis (VIF) ---\n")
+vif(m7)
+
+# B. Predicted vs Actual (Visual Check for Westminster)
+# Checking if the model correctly predicts Westminster's high crime rates
+plot_data <- df_final %>%
+  mutate(
+    fitted = fitted(m7),
+    resid = resid(m7),
+    is_westminster = ifelse(Borough == "Westminster", "Westminster", "Other")
+  )
+
+p_check <- ggplot(plot_data, aes(x = exp(fitted), y = Crime_Rate)) + # Convert back to original scale
+  geom_point(aes(color = is_westminster), alpha = 0.6) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  scale_color_manual(values = c("gray", "red")) +
+  labs(title = "Model Fit: Is Westminster still an outlier?",
+       subtitle = "If red dots fall near the dashed line, the model explains its high crime",
+       x = "Predicted Crime Rate", y = "Actual Crime Rate") +
+  theme_minimal()
+
+print(p_check)
+
+ggsave("Westminster_Check_Model7.png", plot = p_check, width = 8, height = 6)
+```
+
+
+check moodle and 
+```{r model_diagnostics多量检验, fig.width=12, fig.height=9}
+library(performance)
+library(see)
+check_model(m4)
+check_model(m5)
+check_model(m6)
+check_model(m7)
+```
+
+
+
+LASSO Selection and Outlier Management
+
+In this section, we applied the LASSO (Least Absolute Shrinkage and Selection Operator) method to implement a data-driven feature selection process. Concurrently, we refined the dataset by excluding high-leverage outliers, specifically the Westminster area, which had previously distorted model estimates due to its unique non-residential characteristics. Based on the LASSO selection results, we systematically removed variables exhibiting significant multicollinearity and reorganized the remaining predictors into a new, optimized variable combination for the final regression analysis.
+
+```{r lasso_selection, echo=FALSE}
+# ==============================================================================
+# 0. Install and Load Required Packages
+# ==============================================================================
+# If not installed, please run: install.packages(c("tidyverse", "glmnet", "broom"))
+library(tidyverse)  # Data manipulation powerhouse
+library(glmnet)     # Core package for Lasso regression
+library(broom)      # For tidy output results
+
+# ==============================================================================
+# 1. Load Data and Preprocessing
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# Extract Borough name and remove exclusions
+# Logic: Remove the suffix from LSOA_Name (e.g., "Westminster 013B" -> "Westminster")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$")) %>%
+  filter(!Derived_Borough %in% c("Westminster", "City of London"))
+
+cat("Data cleaning complete.\n")
+cat("Original sample size:", nrow(df), " -> Sample size after cleaning:", nrow(df_clean), "\n\n")
+
+# ==============================================================================
+# 2. Prepare Lasso Data Matrix
+# ==============================================================================
+# Define candidate variable pool (Consistent with Python version)
+candidate_cols <- c(
+  "log_job_density", "log_pop_density", 
+  "pct_private_rented", "pct_overcrowded", 
+  "log_migrant", "log_youth",
+  "pct_unemployed", "pct_deprived", 
+  "pct_bad_health", "pct_disabled", "pct_hh_with_disabled",
+  "pct_no_qual", "pct_level4_qual", 
+  "pct_born_europe", "pct_born_africa", "pct_born_asia", "pct_born_americas", 
+  "pct_elementary_occup", 
+  "pct_christian", "pct_muslim", "pct_no_religion"
+)
+
+# Ensure only columns present in data are selected
+available_cols <- candidate_cols[candidate_cols %in% names(df_clean)]
+
+# Fix: Explicitly call dplyr::select
+X <- df_clean %>%
+  dplyr::select(all_of(available_cols)) %>%  # <--- Added dplyr:: here
+  mutate(across(everything(), ~replace_na(., mean(., na.rm = TRUE)))) %>%
+  as.matrix()
+
+# Prepare dependent variable Y
+Y <- df_clean$log_crime_rate
+
+cat("Lasso matrix preparation complete. Matrix dimensions:", dim(X), "\n")
+
+# ==============================================================================
+# 3. Run Lasso (cv.glmnet automated cross-validation)
+# ==============================================================================
+set.seed(42) # Ensure reproducibility
+
+# alpha = 1 means Lasso (alpha = 0 is Ridge)
+# standardize = TRUE is default, explicitly stated here for emphasis
+cv_fit <- cv.glmnet(X, Y, alpha = 1, standardize = TRUE)
+
+# Output best lambda value
+best_lambda <- cv_fit$lambda.min
+cat("Best Lambda selected by Lasso:", best_lambda, "\n")
+
+# Plot cross-validation error (Optional)
+plot(cv_fit) 
+
+# ==============================================================================
+# 4. Extract Selected Variables (Fixed version: Not relying on broom::tidy)
+# ==============================================================================
+# Get coefficients at best lambda
+lasso_coefs <- coef(cv_fit, s = "lambda.min")
+
+# Manually convert to data frame (Core fix: matrix first, then data frame)
+coef_df <- data.frame(
+  Variable = rownames(lasso_coefs),
+  Coef = as.numeric(lasso_coefs)
+) %>%
+  filter(Variable != "(Intercept)") %>%  # Remove intercept
+  filter(Coef != 0) %>%                  # Keep only non-zero coefficients
+  arrange(desc(abs(Coef)))               # Sort by importance
+
+cat("\n--- Variables Selected by Lasso and Their Coefficients ---\n")
+print(coef_df)
+
+# Extract list of variable names for subsequent OLS use
+selected_vars <- coef_df$Variable
+
+# ==============================================================================
+# 5. Run Final OLS Regression (Post-Lasso OLS)
+# ==============================================================================
+if (length(selected_vars) > 0) {
+  cat("\n\n=== Final OLS Regression Results (Using only variables selected by Lasso) ===\n")
+  
+  # Dynamically construct regression formula
+  formula_str <- paste("log_crime_rate ~", paste(selected_vars, collapse = " + "))
+  
+  # Run linear regression
+  final_model <- lm(as.formula(formula_str), data = df_clean)
+  
+  # Print standard summary
+  print(summary(final_model))
+  
+  # Print VIF (If you need to check multicollinearity)
+  if(require(car)) {
+    cat("\n--- Multicollinearity Diagnosis (VIF) ---\n")
+    print(vif(final_model))
+  }
+} else {
+  cat("Lasso removed all variables, please check data.")
+}
+```
+
+
+check moodle
+```{r model_diagnostics final_model, fig.width=12, fig.height=9}
+library(performance)
+library(see)
+check_model(final_model)
+```
+
+
+Model Optimization based on Combined Selection Strategies
+
+Synthesizing the insights from the LASSO feature selection and the preliminary scatter plot correlation analysis, we curated the maximal set of relevant predictors for this iteration. The resulting model demonstrated superior performance metrics compared to previous specifications. Consequently, we proceeded to further refine and optimize the analysis based on this robust foundational model.
+
+```{r improved_variable_selection, echo=FALSE}
+# ==========================================
+# Model Refinement: Top 18 Correlated Variables
+# ==========================================
+
+# 1. Variable Definition
+# Selecting the top 18 variables with the highest correlation coefficients
+vars_top18 <- c(
+  "pct_unemployed",       # Unemployment Rate
+  "pct_private_rented",   # Private Rented Sector
+  "pct_20_24",            # Youth Population (Raw)
+  "pct_new_migrant",      # New Migrants (Raw)
+  "pct_born_americas",    # Country of Birth: Americas
+  "pct_overcrowded",      # Overcrowding Rate
+  "pct_deprived",         # Household Deprivation
+  "pct_bad_health",       # Bad Health Status
+  "pct_born_africa",      # Country of Birth: Africa
+  "pct_muslim",           # Religion: Muslim
+  "pct_elementary_occup", # Elementary Occupations
+  "pct_disabled",         # Disability Status
+  
+  "log_job_density",      # Job Density (Log Transformed)
+  "pct_buddhist",         # Religion: Buddhist
+  "pct_no_qual",          # No Qualifications
+  "pct_born_asia",        # Country of Birth: Asia
+  "pct_hh_with_disabled"  # Households with Disabled Persons
+)
+
+# 2. Construct Regression Formula
+formula_top18 <- as.formula(
+  paste("log_crime_rate ~", paste(vars_top18, collapse = " + "))
+)
+
+# 3. Run Multiple Linear Regression
+model_top18 <- lm(formula_top18, data = df_final)
+
+# 4. View Results
+# Check model summary statistics (R-squared, Coefficients, p-values)
+summary(model_top18)
+
+# 5. Multicollinearity Diagnostic
+library(car)
+cat("\n--- Variance Inflation Factor (VIF) Check ---\n")
+vif(model_top18)
+```
+
+check moodle
+```{r model_diagnostics final_model, fig.width=12, fig.height=9}
+library(performance)
+library(see)
+check_model(model_top18)
+```
+
+
+Spatial Fixed Effects Optimization
+
+Building upon the previous specification, we further optimized the model by introducing Borough-level fixed effects to control for unobserved spatial heterogeneity across London's administrative districts. A coefficient plot was generated to visualize the specific impact of these location effects. The final model demonstrated satisfactory goodness-of-fit, and multicollinearity diagnostics confirmed that variable variance inflation remained within acceptable limits.
+
+```{r introduce_borough_fixed_effects, echo=FALSE}
+
+# ==============================================================================
+# 0. Load Required Packages
+# ==============================================================================
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(stargazer)
+library(car)    # For VIF check
+library(broom)  # For extracting model coefficients
+
+# ==============================================================================
+# 1. Data Loading and Cleaning
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# [Key Step] Extract Borough Names (Derived_Borough)
+# Logic: Remove the suffix code from LSOA_Name (e.g., "Barking 016A" -> "Barking")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$"))
+
+# Verify generation (Should be 32 or 33 boroughs)
+cat("Number of Boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+# ==============================================================================
+# 2. Model Specification
+# ==============================================================================
+
+# Select the top 18 variables with the highest correlation
+vars_top18 <- c(
+  "pct_unemployed",
+  "pct_private_rented",
+  "pct_20_24",
+  "pct_new_migrant",
+  "pct_born_americas",
+  "pct_overcrowded",
+  "pct_deprived",
+  "pct_bad_health",
+  "pct_born_africa",
+  "pct_muslim",
+  "pct_elementary_occup",
+  "pct_disabled",
+  
+  "log_job_density",
+  "pct_buddhist",
+  "pct_no_qual",
+  "pct_born_asia",
+  "pct_hh_with_disabled"
+)
+
+# Construct Formula
+# Adding Fixed Effects: "+ factor(Derived_Borough)"
+formula_top18_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top18, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# Run Multiple Regression with Fixed Effects
+model_check_under_borough_ctrl <- lm(formula_top18_borough, data = df_clean)
+
+# View Results
+stargazer(
+  model_check_under_borough_ctrl,
+  type = "text",
+  omit = "Derived_Borough", # Hide the long list of borough dummy variables for clarity
+  omit.stat = c("f", "ser"),
+  add.lines = list(
+    c("Borough fixed effects", "Yes")
+  ),
+  title = "Regression Results with Borough Fixed Effects"
+)
+
+# Multicollinearity Check (VIF)
+vif(model_check_under_borough_ctrl)
+
+
+# ==============================================================================
+# 3. Visualization
+# ==============================================================================
+# Extract coefficients to identify boroughs with intrinsic high crime risk 
+# after controlling for socio-economic factors
+
+fe_coefs <- tidy(model_check_under_borough_ctrl) %>%
+  filter(str_detect(term, "factor\\(Derived_Borough\\)")) %>%
+  mutate(
+    Borough = str_remove(term, "factor\\(Derived_Borough\\)"),
+    Borough = factor(Borough),
+    Borough = fct_reorder(Borough, estimate)
+  )
+
+p <- ggplot(fe_coefs, aes(x = Borough, y = estimate)) +
+  geom_col(fill = "#2E9FDF", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Residual crime effects after controlling for socio-economic factors",
+    subtitle = "Positive values indicate boroughs with higher crime than predicted by the model",
+    y = "Borough fixed effect (log scale)",
+    x = ""
+  ) +
+  theme_minimal()
+
+# Save and Display
+ggsave("Borough_Fixed_Effects.png", p, width = 10, height = 8)
+print(p)
+```
+
+
+Exclusion of Ethnicity and Religion Variables
+Building upon the fixed-effects model, we conducted a sensitivity analysis by excluding variables related to ethnicity and religion. The results indicated that removing these factors had a negligible impact on the model's overall explanatory power (Adjusted $R^2$). Consequently, adhering to the principle of model parsimony, these variables were excluded from the final model specification.
+
+```{r remove_ethnicity_religion, echo=FALSE}
+
+# ==============================================================================
+# 0. Load Required Packages
+# ==============================================================================
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(stargazer)
+library(car) # For VIF check
+
+# ==============================================================================
+# 1. Data Loading and Cleaning
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# [Key Step] Extract Borough Names (Derived_Borough)
+# Logic: Remove the suffix code from LSOA_Name (e.g., "Barking 016A" -> "Barking")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$"))
+
+# Verify generation (Should be 32 or 33 boroughs)
+cat("Number of Boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+# ==============================================================================
+# 2. Variable Selection (Refined)
+# ==============================================================================
+# Defining the refined variable list (Ethnicity and Religion variables removed)
+vars_top <- c(
+  "pct_unemployed",       # Unemployment
+  "pct_private_rented",   # Private Rented Sector
+  "pct_20_24",            # Youth Population
+  "pct_new_migrant",      # New Migrants
+  "pct_overcrowded",      # Overcrowding
+  "pct_deprived",         # Deprivation
+  "pct_bad_health",       # Bad Health
+  "pct_elementary_occup", # Low-level Occupations
+  "pct_disabled",         # Disability
+  "log_job_density",      # Job Density (Log)
+  "pct_no_qual",          # No Qualifications
+  "pct_hh_with_disabled"  # Households with Disabled Persons
+)
+
+# Construct Formula
+formula_top_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# ==============================================================================
+# 3. Run Regression and Diagnostics
+# ==============================================================================
+
+# Run Multiple Regression
+model_check_under_borough_ctrl2 <- lm(formula_top_borough, data = df_clean)
+
+# View Results (Stargazer Table)
+stargazer(
+  model_check_under_borough_ctrl2,
+  type = "text",
+  omit = "Derived_Borough",      # Hide individual borough coefficients for clarity
+  omit.stat = c("f", "ser"),
+  add.lines = list(
+    c("Borough fixed effects", "Yes")
+  ),
+  title = "Refined Model Results (Ethnicity/Religion Excluded)"
+)
+
+# Multicollinearity Check (VIF)
+cat("\n--- Variance Inflation Factor (VIF) Check ---\n")
+vif(model_check_under_borough_ctrl2)
+```
+
+```{r model2_correlation_matrix, echo=TRUE}
+# ==============================================================================
+# Model 2 相关性矩阵检验：验证为何需要剔除 Deprivation
+# ==============================================================================
+
+# 1. 加载必要的包
+if (!require("ggcorrplot")) install.packages("ggcorrplot")
+library(tidyverse)
+library(ggcorrplot)
+
+# 2. 准备数据
+# 提取 Model 2 中包含的所有变量 (含 Deprivation)
+df_model2_corr <- df_clean %>%
+  select(
+    `Log Crime Rate` = log_crime_rate,
+    
+    # 核心结构变量
+    `Unemployment` = pct_unemployed,
+    `Deprivation (IMD)` = pct_deprived,      # 重点关注对象
+    `Overcrowding` = pct_overcrowded,
+    `Private Rented` = pct_private_rented,
+    
+    # 脆弱性与健康
+    `Bad Health` = pct_bad_health,
+    `Disability` = pct_disabled,
+    `HH w/ Disabled` = pct_hh_with_disabled,
+    
+    # 社会与人口
+    `Youth (20-24)` = pct_20_24,
+    `New Migrant` = pct_new_migrant,
+    `No Quals` = pct_no_qual,
+    `Elementary Occup` = pct_elementary_occup,
+    
+    # 环境
+    `Log Job Density` = log_job_density
+  )
+
+# 3. 计算相关性矩阵
+corr_matrix_m2 <- cor(df_model2_corr, use = "complete.obs", method = "pearson")
+
+# 4. 绘制热力图
+p_corr_m2 <- ggcorrplot(corr_matrix_m2,
+  method = "square",       # 方块样式
+  type = "lower",          # 只显示下半部分
+  lab = TRUE,              # 显示数值
+  lab_size = 2.5,          # 字体稍微调小一点，因为变量多
+  tl.cex = 10,             # 坐标轴标签大小
+  colors = c("#2E9FDF", "white", "#E7B800"), # 蓝-白-黄 配色
+  title = "Correlation Matrix: Model 2 (Highlighting Collinearity)",
+  ggtheme = theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+)
+
+# 5. 展示并保存
+print(p_corr_m2)
+ggsave("Model2_Correlation_Matrix.png", p_corr_m2, width = 10, height = 10, bg = "white")
+```
+
+
+
+
+
+
+
+check moodle
+```{r model_diagnostics12, fig.width=12, fig.height=9}
+library(performance)
+library(see)
+check_model(model_check_under_borough_ctrl2)
+```
+
+
+
+Further Model Simplification and Multicollinearity Reduction
+
+To further streamline the model, we reduced the number of variables by eliminating those exhibiting significant multicollinearity (as indicated by high VIF scores in the previous step). A new, parsimonious model was then generated to verify the stability and performance of this simplified specification.
+
+```{r remove_collinear_var_deprived, echo=FALSE}
+
+# ==============================================================================
+# 0. Load necessary packages
+# ==============================================================================
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(stargazer)
+
+# ==============================================================================
+# 1. Data reading and cleaning
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# [Key Step] Extract Borough Name (Derived_Borough)
+# Logic: Remove the final numbering from LSOA_Name (e.g., "Barking 016A" -> "Barking")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$"))
+
+# Check if generated successfully (should be 32 or 33 boroughs)
+cat("Number of Boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+
+
+vars_top <- c(
+  "pct_unemployed",
+  "pct_private_rented",
+  "pct_20_24",
+  "pct_new_migrant",
+  "pct_overcrowded",
+  "pct_bad_health",
+  "pct_elementary_occup",
+  "pct_disabled",
+  "log_job_density",
+  "pct_no_qual",
+  "pct_hh_with_disabled"
+)
+
+# Construct formula
+formula_top_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# Run multiple regression
+model_check_under_borough_ctrl2 <- lm(formula_top_borough, data = df_clean)
+
+# View results
+stargazer(
+  model_check_under_borough_ctrl2,
+  type = "text",
+  omit = "Derived_Borough",
+  omit.stat = c("f", "ser"),
+  add.lines = list(
+    c("Borough fixed effects", "Yes")
+  )
+)
+
+
+cat("\n--- Variance Inflation Factor (VIF) Check ---\n")
+
+vif(model_check_under_borough_ctrl2)
+```
+
+
+Variable Reduction for Optimal Specification
+
+We proceeded with further variable screening and reduction to identify the optimal combination of predictors for the final model.
+
+```{r reduce_variables, echo=FALSE}
+
+# ==============================================================================
+# 0. Load necessary packages
+# ==============================================================================
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(stargazer)
+
+# ==============================================================================
+# 1. Data reading and cleaning
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# [Key Step] Extract Borough Name (Derived_Borough)
+# Logic: Remove the final numbering from LSOA_Name (e.g., "Barking 016A" -> "Barking")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$"))
+
+# Check if generated successfully (should be 32 or 33 boroughs)
+cat("Number of Boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+
+
+vars_top <- c(
+  "pct_unemployed",
+  "pct_private_rented",
+  "pct_20_24",
+  "pct_new_migrant",
+  "pct_overcrowded",
+  "pct_bad_health",
+  "pct_disabled",
+  "log_job_density",
+  "pct_no_qual"
+  )
+
+# Construct formula
+formula_top_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# Run multiple regression
+model_check_under_borough_ctrl3 <- lm(formula_top_borough, data = df_clean)
+
+# View results
+stargazer(
+  model_check_under_borough_ctrl3,
+  type = "text",
+  omit = "Derived_Borough",
+  omit.stat = c("f", "ser"),
+  add.lines = list(
+    c("Borough fixed effects", "Yes")
+  )
+)
+
+
+library(car)
+
+vif(model_check_under_borough_ctrl3)
+
+library(broom)
+
+fe_coefs <- tidy(model_check_under_borough_ctrl3) %>%
+  filter(str_detect(term, "factor\\(Derived_Borough\\)")) %>%
+  mutate(
+    Borough = str_remove(term, "factor\\(Derived_Borough\\)"),
+    Borough = factor(Borough),
+    Borough = fct_reorder(Borough, estimate)
+  )
+
+p <- ggplot(fe_coefs, aes(x = Borough, y = estimate)) +
+  geom_col(fill = "#2E9FDF", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Residual crime effects after controlling for socio-economic factors",
+    subtitle = "Positive values indicate boroughs with higher crime than predicted",
+    y = "Borough fixed effect (log scale)",
+    x = ""
+  ) +
+  theme_minimal()
+
+ggsave("Borough_Fixed_Effects.png", p, width = 10, height = 8)
+print(p)
+```
+
+
+Final Model Refinement and Conclusion
+
+Building upon the previous iteration, we further refined the model by eliminating variables characterized by high multicollinearity or limited explanatory contribution. The resulting streamlined model achieves an optimal balance between model parsimony and explanatory power. This step marks the culmination of the final predictor selection process and concludes the regression analysis phase.
+
+```{r final_model, echo=FALSE}
+
+# ==============================================================================
+# 0. Load necessary packages
+# ==============================================================================
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(stargazer)
+
+# ==============================================================================
+# 1. Data reading and cleaning
+# ==============================================================================
+# Read data
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+# [Key Step] Extract Borough Name (Derived_Borough)
+# Logic: Remove the final numbering from LSOA_Name (e.g., "Barking 016A" -> "Barking")
+df_clean <- df %>%
+  mutate(Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$"))
+
+# Check if generated successfully (should be 32 or 33 boroughs)
+cat("Number of Boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+
+
+vars_top <- c(
+  "pct_unemployed",
+  "pct_private_rented",
+  "pct_20_24",
+  "pct_new_migrant",
+  "pct_overcrowded",
+  "pct_bad_health",
+  "log_job_density"
+  )
+
+# Construct formula
+formula_top_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# Run multiple regression
+model_check_under_borough_ctrl4 <- lm(formula_top_borough, data = df_clean)
+
+# View results
+# Note: corrected model reference to model_check_under_borough_ctrl4
+stargazer(
+  model_check_under_borough_ctrl4,
+  type = "text",
+  omit = "Derived_Borough",
+  omit.stat = c("f", "ser"),
+  add.lines = list(
+    c("Borough fixed effects", "Yes")
+  )
+)
+
+
+library(car)
+
+vif(model_check_under_borough_ctrl4)
+
+library(broom)
+
+fe_coefs <- tidy(model_check_under_borough_ctrl4) %>%
+  filter(str_detect(term, "factor\\(Derived_Borough\\)")) %>%
+  mutate(
+    Borough = str_remove(term, "factor\\(Derived_Borough\\)"),
+    Borough = factor(Borough),
+    Borough = fct_reorder(Borough, estimate)
+  )
+
+p <- ggplot(fe_coefs, aes(x = Borough, y = estimate)) +
+  geom_col(fill = "#2E9FDF", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Residual crime effects after controlling for socio-economic factors",
+    subtitle = "Positive values indicate boroughs with higher crime than predicted",
+    y = "Borough fixed effect (log scale)",
+    x = ""
+  ) +
+  theme_minimal()
+
+ggsave("Borough_Fixed_Effects.png", p, width = 10, height = 8)
+print(p)
+```
+
+
+check moodle
+```{r model_diagnostics14, fig.width=12, fig.height=9}
+library(performance)
+library(see)
+check_model(model_check_under_borough_ctrl4)
+```
+
+
+
+Visualizing Relative Explanatory Power
+
+Based on the variables selected for the final model, we generated a horizontal bar chart to visualize the relative explanatory power of each predictor. To ensure comparability across variables with different units, standardized coefficients were calculated, allowing for a direct assessment of which factors exert the strongest influence on crime rates.
+
+```{r factor_explanatory_power_bar_chart, echo=FALSE}
+# ==============================================================================
+# Regression + Coefficient Visualization (Controlling for Borough Fixed Effects)
+# ==============================================================================
+
+# 0. Load necessary packages
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("broom")) install.packages("broom")
+if (!require("stargazer")) install.packages("stargazer")
+
+library(tidyverse)
+library(broom)
+library(stargazer)
+
+# ==============================================================================
+# 1. Data reading and cleaning
+# ==============================================================================
+df <- read_csv("London_LSOA_Final_Model_Data_v4.csv")
+
+df_clean <- df %>%
+  mutate(
+    Derived_Borough = str_remove(LSOA_Name, " [0-9A-Z]+$")
+  )
+
+cat("Number of boroughs:", length(unique(df_clean$Derived_Borough)), "\n")
+
+# ==============================================================================
+# 2. Define core explanatory variables
+# ==============================================================================
+vars_top <- c(
+  "pct_unemployed",
+  "pct_private_rented",
+  "pct_20_24",
+  "pct_new_migrant",
+  "pct_overcrowded",
+  "pct_bad_health",
+  "log_job_density"
+)
+
+# Construct regression formula (including Borough fixed effects)
+formula_top_borough <- as.formula(
+  paste(
+    "log_crime_rate ~",
+    paste(vars_top, collapse = " + "),
+    "+ factor(Derived_Borough)"
+  )
+)
+
+# ==============================================================================
+# 3. Run multiple regression
+# ==============================================================================
+model_fe <- lm(formula_top_borough, data = df_clean)
+
+# (Optional) Regression table, omitting Borough dummy variables
+stargazer(
+  model_fe,
+  type = "text",
+  omit = "Derived_Borough",
+  omit.stat = c("f", "ser"),
+  add.lines = list(c("Borough fixed effects", "Yes"))
+)
+
+# ==============================================================================
+# 4. Extract and organize "Non-Borough" regression coefficients
+# ==============================================================================
+coef_df <- tidy(model_fe) %>%
+  filter(!str_detect(term, "factor\\(Derived_Borough\\)")) %>%  # Remove fixed effects
+  filter(term != "(Intercept)") %>%                              # Remove intercept
+  mutate(
+    estimate_pos = estimate > 0,
+    term = fct_reorder(term, estimate)
+  )
+
+# (Optional) Variable name formatting (Recommended for papers/reports)
+coef_df <- coef_df %>%
+  mutate(
+    label = case_when(
+      term == "pct_unemployed"     ~ "Unemployment rate",
+      term == "pct_private_rented" ~ "Private renting",
+      term == "pct_20_24"          ~ "Population aged 20–24",
+      term == "pct_new_migrant"    ~ "Recent migrants",
+      term == "pct_overcrowded"    ~ "Overcrowding",
+      term == "pct_bad_health"     ~ "Poor health",
+      term == "log_job_density"    ~ "Job density"
+    ),
+    label = fct_reorder(label, estimate)
+  )
+# ==============================================================================
+# 5. Plot coefficient bar chart
+# ==============================================================================
+p <- ggplot(coef_df, aes(x = label, y = estimate, fill = estimate_pos)) +
+  geom_col(width = 0.7) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("FALSE" = "#F8766D", "TRUE" = "#00BFC4"),
+    name = "Estimate > 0"
+  ) +
+  labs(
+    title = "Estimated effects of socio-economic factors on crime",
+    subtitle = "Model controls for borough fixed effects",
+    x = "",
+    y = "Regression coefficient (log crime rate)"
+  ) +
+  theme_minimal()
+
+print(p)
+
+# Save image
+ggsave("Key_Variables_Coefficient_Plot.png", p, width = 9, height = 6)
+```
+
+
+
+
+
+
+
+
+
+
+```{r viz_marginal_effects, echo=TRUE}
+# ==============================================================================
+# 逐一展示并保存边际效应图
+# ==============================================================================
+
+library(tidyverse)
+library(ggeffects)
+
+# 1. 再次确保数据和模型是正确的 (避免之前的 factor 报错)
+df_clean <- df_clean %>%
+  mutate(Derived_Borough = as.factor(Derived_Borough))
+
+vars_top <- c("pct_unemployed", "pct_private_rented", "pct_20_24", 
+              "pct_new_migrant", "pct_overcrowded", "pct_bad_health", 
+              "log_job_density")
+
+# 使用清洗后的公式 (去掉 formula 里的 factor() 调用)
+formula_clean <- as.formula(
+  paste("log_crime_rate ~", paste(vars_top, collapse = " + "), "+ Derived_Borough")
+)
+
+model_clean <- lm(formula_clean, data = df_clean)
+
+# 2. 设定我们要看的三个核心变量
+vars_of_interest <- c("pct_unemployed", "pct_private_rented", "log_job_density")
+
+# 3. 循环生成、展示并保存每一张图
+for (var in vars_of_interest) {
+  
+  # 计算边际效应
+  eff <- ggpredict(model_clean, terms = var)
+  
+  # 绘图
+  p <- plot(eff) +
+    labs(
+      title = paste("Marginal Effect Analysis:", var), # 标题
+      y = "Predicted Log Crime Rate",
+      x = var
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(size = 12)
+    )
+  
+  # [关键步骤] 逐一打印到屏幕
+  print(p)
+  
+  # [可选步骤] 逐一保存为单独的图片文件
+  # 文件名会自动根据变量名生成，如 "Effect_pct_unemployed.png"
+  filename <- paste0("Effect_", var, ".png")
+  ggsave(filename, p, width = 6, height = 5, bg = "white")
+  
+  cat("已保存图片:", filename, "\n")
+}
+```
+
+
